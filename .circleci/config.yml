@@ -1,4 +1,4 @@
-version: 2
+version: 2.1
 jobs:
   test-job:
     docker:
@@ -13,6 +13,7 @@ jobs:
       - run: echo 'Hello there!!!!'
     
 workflows:
+  version: 2.1
   "My workflow":
     jobs:
       - test-job

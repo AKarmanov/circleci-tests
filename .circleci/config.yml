@@ -1,18 +1,209 @@
 version: 2.1
+
+references:
+  workdir: &workdir
+    working_directory: ~/source
+
+  persist-workspace: &persist-workspace
+    persist_to_workspace:
+      root: ~/source
+      paths:
+        - .
+
+  attach-workspace: &attach-workspace
+    attach_workspace:
+      at: .
+
 jobs:
-  test-job:
+  initialize:
+    <<: *workdir
     docker:
-      - image: ubuntu:14.04
-
-    working_directory: ~/repo
-
+      - image: circleci/node:latest-browsers
     steps:
       - checkout
-      - run: echo 'Hello there!!!!'
-    
+      - restore_cache:
+          keys:
+            - v2-npm-{{ checksum "yarn.lock" }}
+      - run:
+          name: Install dependencies
+          command: yarn
+      - save_cache:
+          key: v2-npm-{{ checksum "yarn.lock" }}
+          paths:
+            - node_modules
+      - *persist-workspace
+
+  lint:
+    <<: *workdir
+    docker:
+      - image: circleci/node:latest-browsers
+    steps:
+      - *attach-workspace
+      - run:
+          name: Lint
+          command: yarn run lint
+
+  node-12:
+    <<: *workdir
+    docker:
+      - image: circleci/node:12-browsers
+    steps:
+      - *attach-workspace
+      - run:
+          name: Try generating a default manifest
+          command: ./bin/run manifest:create --manifest=/tmp/manifest.yml
+
+  node-latest:
+    <<: *workdir
+    docker:
+      - image: circleci/node:latest-browsers
+    steps:
+      - *attach-workspace
+      - run:
+          name: Try generating a default manifest
+          command: ./bin/run manifest:create --manifest=/tmp/manifest.yml
+
+  integration-tests:
+    <<: *workdir
+    docker:
+      - image: circleci/node:latest-browsers
+      - image: jahia/jahia-dev:latest
+    steps:
+      - *attach-workspace
+      - run:
+          name: Check jahia-cli help
+          command: ./bin/run --help
+      - run:
+          name: Wait for Jahia to be alive
+          command: ./bin/run alive
+      - run:
+          name: Generate a default manifest
+          command: ./bin/run manifest:create --manifest=/tmp/manifest.yml
+      - run:
+          name: Checking if an individual module has been installed
+          command: ./bin/run modules:check --id=addstuff
+      - run:
+          name: Fetch a module from the store
+          command: wget https://store.jahia.com/cms/mavenproxy/private-app-store/org/jahia/modules/addstuff/1.3/addstuff-1.3.jar -P /tmp/
+      - run:
+          name: Manually installing a module
+          command: ./bin/run modules:install --file=/tmp/addstuff-1.3.jar --id=addstuff
+
+  # Publish a new version of the jahia-cli to NPM
+  npm-publish:
+    <<: *workdir
+    docker:
+      - image: circleci/node:latest-browsers
+    environment:
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: true
+    working_directory: ~/jahia-cli
+    steps:
+      - *attach-workspace
+      - run:
+          name: Install Typescript
+          command: sudo npm -g install typescript
+      - run:
+          name: Install oclif-dev
+          command: sudo npm -g install @oclif/dev-cli
+      - run:
+          name: Authenticate with NPM registry
+          command: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > .npmrc
+      - run:
+          name: Updating NPM version with GitHub tag
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG/v/''}
+            echo "Image tag is: $IMAGE_TAG"
+            npm --no-git-tag-version version $IMAGE_TAG
+      - run:
+          name: Build the typescript app
+          command: tsc -b
+      - run:
+          name: Generate the oclif manifest
+          command: oclif-dev manifest
+      - run:
+          name: Update the oclif readme
+          command: oclif-dev readme
+      - run:
+          name: ls jahia-cli content
+          command: ls -lah ./
+      - run:
+          name: Publish to NPM registry
+          command: npm publish
+
+  # Re-run integration tests, but this time with the published package
+  npm-test:
+    docker:
+      - image: circleci/node:latest-browsers
+      - image: jahia/jahia-dev:latest
+    steps:
+      - run:
+          name: Install package from npm
+          command: sudo npm install jahia-cli -g
+      - run:
+          name: Check jahia-cli help
+          command: jahia-cli --help
+      - run:
+          name: Wait for Jahia to be alive
+          command: jahia-cli alive
+      - run:
+          name: Generate a default manifest
+          command: jahia-cli manifest:create --manifest=/tmp/manifest.yml
+      - run:
+          name: Checking if an individual module has been installed
+          command: jahia-cli modules:check --id=addstuff
+      - run:
+          name: Fetch a module from the store
+          command: wget https://store.jahia.com/cms/mavenproxy/private-app-store/org/jahia/modules/addstuff/1.3/addstuff-1.3.jar -P /tmp/
+      - run:
+          name: Manually installing a module
+          command: jahia-cli modules:install --file=/tmp/addstuff-1.3.jar --id=addstuff
+
 workflows:
-  version: 2.1
-  "My workflow":
+  version: 2
+  build-npm:
     jobs:
-      - test-job
-      
+      - initialize:
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      - npm-publish:
+          requires:
+            - initialize
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      - npm-test:
+          requires:
+            - npm-publish
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+  lint-and-test:
+    jobs:
+      - initialize:
+          filters:
+            tags:
+              only: /.*/
+            branches:
+              ignore: /^v.*/
+      - lint:
+          requires:
+            - initialize
+      - node-12:
+          requires:
+            - initialize
+      - node-latest:
+          requires:
+            - initialize
+      - integration-tests:
+          requires:
+            - initialize
+            - lint
+            - node-12
+            - node-latest

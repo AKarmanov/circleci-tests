@@ -2,8 +2,6 @@ version: 2.1
 jobs:
   test-job:
     docker:
-      # specify the version you desire here
-      - image: circleci/node:13.7.0
       - image: ubuntu:14.04
 
     working_directory: ~/repo
